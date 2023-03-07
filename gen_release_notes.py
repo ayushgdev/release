@@ -2,6 +2,7 @@ import subprocess
 import argparse
 import re
 from typing import List
+import os, shutil
 
 RE_GROUPS = re.compile(r"^\[(?P<group>.*?)\](?P<content>.*)$")
 RE_GIT_COMMIT_AUTHOR = re.compile(r"^Author:.*<(?P<author>[a-zA-Z\-]+)@.*>$")
@@ -10,24 +11,30 @@ RE_GIT_COMMIT_CHERRYPICK = re.compile(
 )
 RE_GIT_COMMIT_PIPER_TAG = re.compile(r" +PiperOrigin-RevId: (?P<cl>[0-9]+)$")
 RE_GIT_MERGE = re.compile(r"^Merged.*")
-RE_OPTIONS = re.compile(
-    r"(\s.*Options[\s,\.!?\\-_]?)|(.*Option (in)?to *Calculator[\s,\.!?\\-_]?)",
+RE_INTERNAL_CHANGES = re.compile(
+    r"(Code Format(ted|ting)?)|(Updated? Format(ting)?)|formatting|.*\.yaml|.*\.md",
     re.IGNORECASE,
 )
-RE_CALCULATOR = re.compile(r"\s.*Calculator[\s,\.!?\\-_]?")
+RE_OPTIONS = re.compile(
+    r"(\s.*Options[\s,!\?\._-]?)|(.*Option (in)?to *Calculator[\s,!\?\._-]?)",
+    re.IGNORECASE,
+)
+RE_CALCULATOR = re.compile(r"\s.*Calculator[\s,!\?\._-]?")
 RE_SUPPORT_FOR = re.compile(r"support( for)?", re.IGNORECASE)
 RE_ANDROID_CHANGES = re.compile(
-    r"(\saar[\s,\.!?\\-_]?)|(java[\s,\.!?\\-_]?)|(android)", re.IGNORECASE
+    r"(\saar[\s,!\?\._-]?)|(java[\s,!\?\._-]?)|(android)", re.IGNORECASE
 )
+RE_JS_CHANGES = re.compile(r"\s(java-?script)|(js)[\s,!\?\._-]?", re.IGNORECASE)
+RE_PYTHON_CHANGES = re.compile(r"\spython[\s,!\?\._-]?", re.IGNORECASE)
 RE_BUG_FIX = re.compile(r"\sfix(ed)?", re.IGNORECASE)
-RE_DEPS = re.compile(r"dependenc(ies|y)[\s,\.!?\\-_]?", re.IGNORECASE)
-RE_IOS = re.compile(r"\sios[\s,\.!?\\-_]?", re.IGNORECASE)
+RE_DEPS = re.compile(r"dependenc(ies|y)[\s,!\?\._-]?", re.IGNORECASE)
+RE_IOS = re.compile(r"\sios[\s,!\?\._-]?", re.IGNORECASE)
 RE_BAZEL = re.compile(r"bazel", re.IGNORECASE)
 
 
 def check_fine_grained_framework_items(message: str) -> bool:
     """
-    Checks if the given string contains any hint that the change is done in Calculators, 
+    Checks if the given string contains any hint that the change is done in Calculators,
     Calculator Options, Proto options or new support added.
     Return True if any of the above conditions are met; else False.
 
@@ -106,19 +113,19 @@ def parse_framework_changes(
     regex, line: str, added_options, added_calculators, added_support, framework_items
 ):
     if re.search(RE_OPTIONS, line):
-        line = re.sub(regex, "", line)
+        # line = re.sub(regex, "", line)
         line = sentence(line)
         added_options.append(line)
     if re.search(RE_CALCULATOR, line):
-        line = re.sub(regex, "", line)
+        # line = re.sub(regex, "", line)
         line = sentence(line)
         added_calculators.append(line)
     if re.search(RE_SUPPORT_FOR, line):
-        line = re.sub(regex, "", line)
+        # line = re.sub(regex, "", line)
         line = sentence(line)
         added_support.append(line)
     else:
-        line = re.sub(regex, "", line)
+        # line = re.sub(regex, "", line)
         line = sentence(line)
         framework_items.append(line)
 
@@ -162,11 +169,7 @@ class Commit:
         # check merge
         if re.match(RE_GIT_MERGE, self.message):
             return False
-        if re.match(
-            r"(Code Format(ted|ting)?)|(Updated? Format(ting)?)|formatting",
-            self.message,
-            re.IGNORECASE,
-        ):
+        if re.match(RE_INTERNAL_CHANGES, self.message):
             return False
         if re.match(r"^Internal\s?.*\s?change", self.message, re.IGNORECASE):
             return False
@@ -177,6 +180,8 @@ def notes_from_template(
     bazel_changes: List[str],
     android_changes: List[str],
     ios_changes: List[str],
+    js_changes: List[str],
+    python_changes: List[str],
     bug_fixes: List[str],
     framework_changes: List[str],
     build_changes: List[str],
@@ -189,6 +194,8 @@ def notes_from_template(
     framework_changes = "\n".join(["- " + item for item in framework_changes])
     build_changes = "\n".join(["- " + item for item in build_changes])
     deps_changes = "\n".join(["- " + item for item in deps_changes])
+    python_changes = "\n".join(["- " + item for item in python_changes])
+    js_changes = "\n".join(["- " + item for item in js_changes])
 
     x = f"""
 ### Build changes
@@ -209,6 +216,12 @@ other platforms.
 
 #### iOS
 {ios_changes}
+
+#### Javascript
+{js_changes}
+
+#### Python
+{python_changes}
 
 ### Bug fixes
 {bug_fixes}
@@ -269,7 +282,15 @@ def catalogue_rough_notes(from_commit: str, to_commit: str) -> List[str]:
     return notes
 
 
-def section_notes(regex: str, message: str, collection: List[str]) -> bool:
+def added_to_section_notes(
+    regex: str,
+    message: str,
+    collection: List[str],
+    added_options,
+    added_calculators,
+    added_support,
+    framework_items,
+) -> bool:
     """
     Checks if the given commit message should belong to the provided list of changes
     or into the framework changes.
@@ -303,34 +324,73 @@ def section_notes(regex: str, message: str, collection: List[str]) -> bool:
     return True
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--from_commit",
-        required=True,
-        help="The commit in history to start gathering the commits from",
+def additions_or_updates(
+    line, added_options, added_calculators, added_support, framework_items, collection
+):
+    return not added_to_section_notes(
+        r"Add(ed)?",
+        line,
+        collection,
+        added_options,
+        added_calculators,
+        added_support,
+        framework_items,
+    ) and not added_to_section_notes(
+        r"Updated?",
+        line,
+        collection,
+        added_options,
+        added_calculators,
+        added_support,
+        framework_items,
     )
-    parser.add_argument(
-        "--to_commit",
-        required=True,
-        help="The commit in history to stop gathering the commits upto",
-    )
-    parser.add_argument("--version", required=True, help="Version for the new release")
-    args = parser.parse_args()
 
-    notes = catalogue_rough_notes(args.from_commit, args.to_commit)
 
+def process_notes(notes: List[str]):
+    """
+    Processes each line of the notes and adds it to the apt changes list
+
+    Parameters
+    ----------
+    notes: List[str]
+        List of commit titles to process
+
+    Returns
+    -------
+    Tuple[List[str]]
+        A tuple in the following order:
+        android_changes: List[str]
+            List of commit titles specific to android
+        ios_changes: List[str]
+            List of commit titles specific to ios
+        python_changes: List[str]
+            List of commit titles specific to python
+        js_changes: List[str]
+            List of commit titles specific to js
+        bazel_changes: List[str]
+            List of commit titles specific to bazel
+        build_changes: List[str]
+            List of commit titles specific to build
+        deps_changes: List[str]
+            List of commit titles specific to dependency
+    """
+    android_changes, ios_changes, js_changes, python_changes = [], [], [], []
     framework_items = []
+    build_changes = []
     added_calculators, added_support, added_options = [], [], []
-    android_changes, ios_changes = [], []
     bazel_changes, bug_fixes, deps = [], [], []
 
     for line in notes:
         # check for Bazel changes
         if re.search(RE_BAZEL, line):
-            if not section_notes(
-                r"Add(ed)?", line, bazel_changes
-            ) and not section_notes(r"Updated?", line, bazel_changes):
+            if additions_or_updates(
+                line,
+                added_options,
+                added_calculators,
+                added_support,
+                framework_items,
+                bazel_changes,
+            ):
                 continue
 
         # check for iOS changes
@@ -351,23 +411,62 @@ if __name__ == "__main__":
                 ios_changes.append(line.replace("ios", "iOS"))
 
         # check for android changes
-        if re.search(RE_ANDROID_CHANGES, line):
-            if not section_notes(
-                r"Add(ed)?", line, android_changes
-            ) and not section_notes(r"Updated?", line, android_changes):
+        if re.search(RE_ANDROID_CHANGES, line) and not re.search(RE_JS_CHANGES, line):
+            if additions_or_updates(
+                line,
+                added_options,
+                added_calculators,
+                added_support,
+                framework_items,
+                android_changes,
+            ):
+                continue
+
+        # check for javascript changes
+        if not re.search(RE_ANDROID_CHANGES, line) and re.search(RE_JS_CHANGES, line):
+            if additions_or_updates(
+                line,
+                added_options,
+                added_calculators,
+                added_support,
+                framework_items,
+                js_changes,
+            ):
+                continue
+
+        # check for python changes
+        if re.search(RE_PYTHON_CHANGES, line):
+            if additions_or_updates(
+                line,
+                added_options,
+                added_calculators,
+                added_support,
+                framework_items,
+                python_changes,
+            ):
                 continue
 
         # check for bug fixes
         if re.search(RE_BUG_FIX, line):
-            if not section_notes(r"Add(ed)?", line, bug_fixes) and not section_notes(
-                r"Updated?", line, bug_fixes
+            if additions_or_updates(
+                line,
+                added_options,
+                added_calculators,
+                added_support,
+                framework_items,
+                bug_fixes,
             ):
                 continue
 
         # check for dependency changes
         if re.search(RE_DEPS, line):
-            if not section_notes(r"Add(ed)?", line, deps) and not section_notes(
-                r"Updated?", line, deps
+            if additions_or_updates(
+                line,
+                added_options,
+                added_calculators,
+                added_support,
+                framework_items,
+                deps,
             ):
                 continue
 
@@ -405,15 +504,72 @@ if __name__ == "__main__":
     framework_changes.extend(framework_items)
     framework_changes.extend(added_support)
 
-    with open(f"release_notes_v{args.version}", "w") as file:
+    return (
+        android_changes,
+        ios_changes,
+        python_changes,
+        js_changes,
+        bazel_changes,
+        build_changes,
+        deps,
+        bug_fixes,
+        framework_changes,
+    )
+
+
+if __name__ == "__main__":
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument(
+    #     "--from_commit",
+    #     required=True,
+    #     help="The commit in history to start gathering the commits from",
+    # )
+    # parser.add_argument(
+    #     "--to_commit",
+    #     required=True,
+    #     help="The commit in history to stop gathering the commits upto",
+    # )
+    # parser.add_argument(
+    #     "--git_url",
+    #     required=True,
+    #     help="The commit in history to stop gathering the commits upto",
+    # )
+    # parser.add_argument("--version", required=True, help="Version for the new release")
+    # args = parser.parse_args()
+    print(os.getcwd())
+    if os.path.exists("mediapipe"):
+        shutil.rmtree("mediapipe")
+
+    subprocess.check_call(["git", "clone", "https://github.com/google/mediapipe.git"])
+    os.chdir("mediapipe")
+    notes = catalogue_rough_notes(
+        "ce9fec806cd47a4c78cf2362274cf23e0e7341c7",
+        "4a1ba11e3f014f0ecfde6108971a0b649df42fa5",
+    )
+
+    (
+        android_changes,
+        ios_changes,
+        python_changes,
+        js_changes,
+        bazel_changes,
+        build_changes,
+        deps,
+        bug_fixes,
+        framework_changes,
+    ) = process_notes(notes)
+
+    with open(f"release_notes_v0.9.2", "w") as file:
         file.write(
             notes_from_template(
                 bazel_changes=bazel_changes,
                 android_changes=android_changes,
                 ios_changes=ios_changes,
+                python_changes=python_changes,
+                js_changes=js_changes,
                 bug_fixes=bug_fixes,
                 deps_changes=deps,
                 framework_changes=framework_changes,
-                build_changes="",
+                build_changes=build_changes,
             )
         )
