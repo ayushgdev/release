@@ -3,6 +3,7 @@ import argparse
 import re
 from typing import List
 import os, shutil
+from pathlib import Path
 
 RE_GROUPS = re.compile(r"^\[(?P<group>.*?)\](?P<content>.*)$")
 RE_GIT_COMMIT_AUTHOR = re.compile(r"^Author:.*<(?P<author>[a-zA-Z\-]+)@.*>$")
@@ -518,34 +519,27 @@ def process_notes(notes: List[str]):
 
 
 if __name__ == "__main__":
-    # parser = argparse.ArgumentParser()
-    # parser.add_argument(
-    #     "--from_commit",
-    #     required=True,
-    #     help="The commit in history to start gathering the commits from",
-    # )
-    # parser.add_argument(
-    #     "--to_commit",
-    #     required=True,
-    #     help="The commit in history to stop gathering the commits upto",
-    # )
-    # parser.add_argument(
-    #     "--git_url",
-    #     required=True,
-    #     help="The commit in history to stop gathering the commits upto",
-    # )
-    # parser.add_argument("--version", required=True, help="Version for the new release")
-    # args = parser.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--from_commit",
+        required=True,
+        help="The commit in history to start gathering the commits from",
+    )
+    parser.add_argument(
+        "--to_commit",
+        required=True,
+        help="The commit in history to stop gathering the commits upto",
+    )
+    parser.add_argument("--version", required=True, help="Version for the new release")
+    args = parser.parse_args()
     print(os.getcwd())
     if os.path.exists("mediapipe"):
         shutil.rmtree("mediapipe")
 
     subprocess.check_call(["git", "clone", "https://github.com/google/mediapipe.git"])
     os.chdir("mediapipe")
-    notes = catalogue_rough_notes(
-        "ce9fec806cd47a4c78cf2362274cf23e0e7341c7",
-        "4a1ba11e3f014f0ecfde6108971a0b649df42fa5",
-    )
+    subprocess.check_call(["git", "checkout", "release"])
+    notes = catalogue_rough_notes(args.from_commit, args.to_commit)
 
     (
         android_changes,
@@ -559,7 +553,7 @@ if __name__ == "__main__":
         framework_changes,
     ) = process_notes(notes)
 
-    with open(f"release_notes_v0.9.2", "w") as file:
+    with open(f"release_notes_v{args.version}", "w") as file:
         file.write(
             notes_from_template(
                 bazel_changes=bazel_changes,
@@ -573,3 +567,9 @@ if __name__ == "__main__":
                 build_changes=build_changes,
             )
         )
+    shutil.move(
+        os.path.join(os.getcwd(), f"release_notes_v{args.version}"),
+        os.path.join(Path(os.getcwd()).parents[0], f"release_notes_v{args.version}"),
+    )
+    os.chdir(Path(os.getcwd()).parents[0])
+    shutil.rmtree(os.path.join(os.getcwd(), "mediapipe"))
